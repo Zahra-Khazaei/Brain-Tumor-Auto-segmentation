@@ -7,15 +7,19 @@ import numpy as np
 import tensorflow as tf
 from IPython.display import Image
 from keras import backend as K
-from keras.engine import Input, Model
+# from keras.engine import Input, Model
+from tensorflow.keras.models import Model
+# from tensorflow.python.keras.layers import Input
+from keras.layers import Input
 from keras.layers import (
     Activation,
     Conv3D,
-    Deconvolution3D,
+    Conv3DTranspose,
     MaxPooling3D,
     UpSampling3D,
 )
-from keras.layers.merge import concatenate
+from keras.layers import concatenate
+
 from keras.optimizers import Adam
 from keras.utils import to_categorical
 from tensorflow.compat.v1.logging import INFO, set_verbosity
@@ -27,20 +31,18 @@ K.set_image_data_format("channels_first")
 
 def plot_image_grid(image):
     data_all = []
-
     data_all.append(image)
 
     fig, ax = plt.subplots(3, 6, figsize=[16, 9])
 
-    # coronal plane
+
     coronal = np.transpose(data_all, [1, 3, 2, 4, 0])
     coronal = np.rot90(coronal, 1)
 
-    # transversal plane
+
     transversal = np.transpose(data_all, [2, 1, 3, 4, 0])
     transversal = np.rot90(transversal, 2)
 
-    # sagittal plane
     sagittal = np.transpose(data_all, [2, 3, 1, 4, 0])
     sagittal = np.rot90(sagittal, 1)
 
@@ -79,28 +81,17 @@ def visualize_data_gif(data_):
         z = data_[:, :, min(i, data_.shape[2] - 1)]
         img = np.concatenate((x, y, z), axis=1)
         images.append(img)
-    imageio.mimsave("/tmp/gif.gif", images, duration=0.01)
-    return Image(filename="/tmp/gif.gif", format='png')
+    imageio.mimsave("gif.gif", images, duration=0.01)
+    return Image(filename="gif.gif", format='png')
 
 
-# Some code was borrowed from:
-# https://github.com/ellisdg/3DUnetCNN/blob/master/unet3d/
 
 
 def create_convolution_block(input_layer, n_filters, batch_normalization=False,
                              kernel=(3, 3, 3), activation=None,
                              padding='same', strides=(1, 1, 1),
                              instance_normalization=False):
-    """
-    :param strides:
-    :param input_layer:
-    :param n_filters:
-    :param batch_normalization:
-    :param kernel:
-    :param activation: Keras activation layer to use. (default is 'relu')
-    :param padding:
-    :return:
-    """
+
     layer = Conv3D(n_filters, kernel, padding=padding, strides=strides)(
         input_layer)
     if activation is None:
@@ -125,30 +116,11 @@ def unet_model_3d(loss_function, input_shape=(4, 160, 160, 16),
                   deconvolution=False, depth=4, n_base_filters=32,
                   include_label_wise_dice_coefficients=False, metrics=[],
                   batch_normalization=False, activation_name="sigmoid"):
-    """
-    Builds the 3D UNet Keras model.f
-    :param metrics: List metrics to be calculated during model training (default is dice coefficient).
-    :param include_label_wise_dice_coefficients: If True and n_labels is greater than 1, model will report the dice
-    coefficient for each label as metric.
-    :param n_base_filters: The number of filters that the first layer in the convolution network will have. Following
-    layers will contain a multiple of this number. Lowering this number will likely reduce the amount of memory required
-    to train the model.
-    :param depth: indicates the depth of the U-shape for the model. The greater the depth, the more max pooling
-    layers will be added to the model. Lowering the depth may reduce the amount of memory required for training.
-    :param input_shape: Shape of the input data (n_chanels, x_size, y_size, z_size). The x, y, and z sizes must be
-    divisible by the pool size to the power of the depth of the UNet, that is pool_size^depth.
-    :param pool_size: Pool size for the max pooling operations.
-    :param n_labels: Number of binary labels that the model is learning.
-    :param initial_learning_rate: Initial learning rate for the model. This will be decayed during training.
-    :param deconvolution: If set to True, will use transpose convolution(deconvolution) instead of up-sampling. This
-    increases the amount memory required during training.
-    :return: Untrained 3D UNet Model
-    """
+
     inputs = Input(input_shape)
     current_layer = inputs
     levels = list()
 
-    # add levels with max pooling
     for layer_depth in range(depth):
         layer1 = create_convolution_block(input_layer=current_layer,
                                           n_filters=n_base_filters * (
@@ -165,7 +137,6 @@ def unet_model_3d(loss_function, input_shape=(4, 160, 160, 16),
             current_layer = layer2
             levels.append([layer1, layer2])
 
-    # add levels with up-convolution or up-sampling
     for layer_depth in range(depth - 2, -1, -1):
         up_convolution = get_up_convolution(pool_size=pool_size,
                                             deconvolution=deconvolution,
@@ -239,31 +210,24 @@ class VolumeDataGenerator(keras.utils.Sequence):
     def __data_generation(self, list_IDs_temp):
         'Generates data containing batch_size samples'
 
-        # Initialization
         X = np.zeros((self.batch_size, self.num_channels, *self.dim),
                      dtype=np.float64)
         y = np.zeros((self.batch_size, self.num_classes, *self.dim),
                      dtype=np.float64)
 
-        # Generate data
         for i, ID in enumerate(list_IDs_temp):
-            # Store sample
             if self.verbose == 1:
                 print("Training on: %s" % self.base_dir + ID)
             with h5py.File(self.base_dir + ID, 'r') as f:
                 X[i] = np.array(f.get("x"))
-                # remove the background class
                 y[i] = np.moveaxis(np.array(f.get("y")), 3, 0)[1:]
         return X, y
 
     def __getitem__(self, index):
         'Generate one batch of data'
-        # Generate indexes of the batch
         indexes = self.indexes[
                   index * self.batch_size: (index + 1) * self.batch_size]
-        # Find list of IDs
         sample_list_temp = [self.sample_list[k] for k in indexes]
-        # Generate data
         X, y = self.__data_generation(sample_list_temp)
 
         return X, y
@@ -272,20 +236,18 @@ class VolumeDataGenerator(keras.utils.Sequence):
 def get_labeled_image(image, label, is_categorical=False):
     if not is_categorical:
         label = to_categorical(label, num_classes=4).astype(np.uint8)
-
     image = cv2.normalize(image[:, :, :, 0], None, alpha=0, beta=255,
                           norm_type=cv2.NORM_MINMAX, dtype=cv2.CV_32F).astype(
         np.uint8)
 
     labeled_image = np.zeros_like(label[:, :, :, 1:])
 
-    # remove tumor part from image
     labeled_image[:, :, :, 0] = image * (label[:, :, :, 0])
     labeled_image[:, :, :, 1] = image * (label[:, :, :, 0])
     labeled_image[:, :, :, 2] = image * (label[:, :, :, 0])
 
-    # color labels
     labeled_image += label[:, :, :, 1:] * 255
+
     return labeled_image
 
 
@@ -319,7 +281,6 @@ def predict_and_viz(image, label, model, threshold, loc=(100, 100, 50)):
 
     fig, ax = plt.subplots(2, 3, figsize=[10, 7])
 
-    # plane values
     x, y, z = loc
 
     ax[0][0].imshow(np.rot90(image_labeled[x, :, :, :]))
